@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Video Pipeline</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">▶</span>
+      <div>
+        <h1>Video Pipeline</h1>
+        <p class="tagline">Script → voiceover → visuals → audio → finished video</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span class="project-chip">Project <b id="pid">—</b></span>
+      <button class="btn ghost" onclick="newProject()">New project</button>
+      <button class="btn ghost" onclick="toggleSettings()">⚙ Settings</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Settings -->
+    <section id="settings" class="card hidden">
+      <h2>Settings</h2>
+      <div class="grid">
+        <label>Voice
+          <select id="set-voice"></select>
+        </label>
+        <label>Rate
+          <input id="set-rate" value="+0%" />
+        </label>
+        <label>Pitch
+          <input id="set-pitch" value="+0Hz" />
+        </label>
+        <label>Resolution
+          <select id="set-resolution">
+            <option>1920x1080</option>
+            <option>1280x720</option>
+            <option>1080x1080</option>
+          </select>
+        </label>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="set-captions" checked />
+        Captions — animated lower-third text (motion graphics)
+      </label>
+      <button class="btn" onclick="saveSettings()">Save settings</button>
+    </section>
+
+    <!-- Script input -->
+    <section class="card">
+      <div class="card-head">
+        <h2><span class="stage-num">1</span> Script</h2>
+        <p class="hint">Paste your script. Blank line = new scene. Optional lines: <code>visual:</code> <code>sfx:</code> <code>music:</code> <code>voice:</code></p>
+      </div>
+      <textarea id="script" spellcheck="false" placeholder="Paste your script here…"></textarea>
+      <div class="actions">
+        <button class="btn ghost" onclick="loadExample()">Load example</button>
+        <button class="btn primary" onclick="saveScript()">Save &amp; Parse (Stage 1)</button>
+      </div>
+    </section>
+
+    <!-- Scenes preview -->
+    <section class="card hidden" id="scenes-card">
+      <div class="card-head">
+        <h2>Scenes</h2>
+        <p class="hint" id="scenes-count"></p>
+      </div>
+      <div id="scenes" class="scenes"></div>
+    </section>
+
+    <!-- Stages -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Stages</h2>
+        <button class="btn primary" id="run-all" onclick="runAll()">Run all →</button>
+      </div>
+      <div id="stages">
+        <div class="stage" id="stage-voiceover">
+          <div class="stage-head">
+            <span class="stage-num">2</span>
+            <div class="stage-title"><h3>Voiceover</h3><p>Natural narration per scene (edge-tts, free)</p></div>
+            <span class="badge pending" id="badge-voiceover">pending</span>
+            <button class="btn" id="run-voiceover" onclick="runStage('voiceover')">Run</button>
+          </div>
+          <div class="stage-body">
+            <div class="progress"><div class="bar" id="prog-voiceover"></div></div>
+            <pre class="log" id="log-voiceover"></pre>
+            <div class="result" id="result-voiceover"></div>
+          </div>
+        </div>
+
+        <div class="stage" id="stage-visuals">
+          <div class="stage-head">
+            <span class="stage-num">3</span>
+            <div class="stage-title"><h3>Visuals</h3><p>YouTube Creative Commons / stock clips &amp; images</p></div>
+            <span class="badge pending" id="badge-visuals">pending</span>
+            <button class="btn" id="run-visuals" onclick="runStage('visuals')">Run</button>
+          </div>
+          <div class="stage-body">
+            <div class="progress"><div class="bar" id="prog-visuals"></div></div>
+            <pre class="log" id="log-visuals"></pre>
+            <div class="result" id="result-visuals"></div>
+          </div>
+        </div>
+
+        <div class="stage" id="stage-audio">
+          <div class="stage-head">
+            <span class="stage-num">4</span>
+            <div class="stage-title"><h3>Music &amp; SFX</h3><p>Background music + sound effects (free libraries)</p></div>
+            <span class="badge pending" id="badge-audio">pending</span>
+            <button class="btn" id="run-audio" onclick="runStage('audio')">Run</button>
+          </div>
+          <div class="stage-body">
+            <div class="progress"><div class="bar" id="prog-audio"></div></div>
+            <pre class="log" id="log-audio"></pre>
+            <div class="result" id="result-audio"></div>
+          </div>
+        </div>
+
+        <div class="stage" id="stage-assembly">
+          <div class="stage-head">
+            <span class="stage-num">5</span>
+            <div class="stage-title"><h3>Assembly</h3><p>ffmpeg effects, motion graphics &amp; final mix</p></div>
+            <span class="badge pending" id="badge-assembly">pending</span>
+            <button class="btn" id="run-assembly" onclick="runStage('assembly')">Run</button>
+          </div>
+          <div class="stage-body">
+            <div class="progress"><div class="bar" id="prog-assembly"></div></div>
+            <pre class="log" id="log-assembly"></pre>
+            <div class="result" id="result-assembly"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
