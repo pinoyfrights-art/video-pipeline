@@ -11,6 +11,10 @@ DEFAULT_SETTINGS = {
     "resolution": "1920x1080",
     "fps": 30,
     "captions": True,
+    "visual_style": "stock",
+    "openrouter_api_key": "",
+    "openrouter_image_model": "black-forest-labs/flux-schnell",
+    "renderer": "remotion",
 }
 
 

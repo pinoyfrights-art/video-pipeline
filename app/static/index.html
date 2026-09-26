@@ -18,39 +18,72 @@
     <div class="top-actions">
       <span class="project-chip">Project <b id="pid">—</b></span>
       <button class="btn ghost" onclick="newProject()">New project</button>
-      <button class="btn ghost" onclick="toggleSettings()">⚙ Settings</button>
+      <div class="dropdown">
+        <button class="btn ghost" id="menu-btn" onclick="toggleMenu()">☰ Menu <span class="caret">▾</span></button>
+        <div class="dropdown-panel hidden" id="menu-panel">
+          <div class="tabs">
+            <button class="tab active" id="tab-settings" onclick="switchTab('settings')">Settings</button>
+            <button class="tab" id="tab-archive" onclick="switchTab('archive')">Archive</button>
+          </div>
+
+          <div class="tab-pane" id="pane-settings">
+            <div class="grid">
+              <label>Rate
+                <input id="set-rate" value="+0%" />
+              </label>
+              <label>Pitch
+                <input id="set-pitch" value="+0Hz" />
+                <span class="hint">Lower pitch = deeper/older feel · raise = younger</span>
+              </label>
+              <label>Resolution
+                <select id="set-resolution">
+                  <option>1920x1080</option>
+                  <option>1280x720</option>
+                  <option>1080x1080</option>
+                </select>
+              </label>
+            </div>
+            <label class="check">
+              <input type="checkbox" id="set-captions" checked />
+              Captions — animated lower-third text (motion graphics)
+            </label>
+            <div class="ai-settings">
+              <h3>AI — OpenRouter</h3>
+              <label>API key
+                <input id="set-openrouter-key" type="password" placeholder="sk-or-…" autocomplete="off" />
+              </label>
+              <label>Image model
+                <input id="set-openrouter-model" placeholder="black-forest-labs/flux-schnell" />
+              </label>
+              <p class="hint">Used by "Documentary Style" in Stage 3. Saved locally to <code>data/settings.json</code> (never committed).</p>
+            </div>
+            <div class="ai-settings">
+              <h3>Assembly renderer</h3>
+              <label>Renderer
+                <select id="set-renderer">
+                  <option value="remotion">Remotion — motion graphics &amp; transitions</option>
+                  <option value="ffmpeg">ffmpeg — fast, minimal</option>
+                </select>
+              </label>
+              <p class="hint">Remotion needs Node.js + the local <code>remotion/</code> project; it falls back to ffmpeg automatically.</p>
+            </div>
+            <button class="btn primary" onclick="saveSettings()">Save settings</button>
+          </div>
+
+          <div class="tab-pane hidden" id="pane-archive">
+            <div class="archive-head">
+              <h3>Projects</h3>
+              <button class="btn danger" id="archive-delete-all" onclick="deleteAllProjects()" disabled>Delete all</button>
+            </div>
+            <p class="hint">All previously created projects. Open one to edit it, or delete it.</p>
+            <div id="archive-list" class="archive-list"></div>
+          </div>
+        </div>
+      </div>
     </div>
   </header>
 
   <main>
-    <!-- Settings -->
-    <section id="settings" class="card hidden">
-      <h2>Settings</h2>
-      <div class="grid">
-        <label>Voice
-          <select id="set-voice"></select>
-        </label>
-        <label>Rate
-          <input id="set-rate" value="+0%" />
-        </label>
-        <label>Pitch
-          <input id="set-pitch" value="+0Hz" />
-        </label>
-        <label>Resolution
-          <select id="set-resolution">
-            <option>1920x1080</option>
-            <option>1280x720</option>
-            <option>1080x1080</option>
-          </select>
-        </label>
-      </div>
-      <label class="check">
-        <input type="checkbox" id="set-captions" checked />
-        Captions — animated lower-third text (motion graphics)
-      </label>
-      <button class="btn" onclick="saveSettings()">Save settings</button>
-    </section>
-
     <!-- Script input -->
     <section class="card">
       <div class="card-head">
@@ -84,7 +117,9 @@
           <div class="stage-head">
             <span class="stage-num">2</span>
             <div class="stage-title"><h3>Voiceover</h3><p>Natural narration per scene (edge-tts, free)</p></div>
+            <span class="voice-current" id="voice-current"></span>
             <span class="badge pending" id="badge-voiceover">pending</span>
+            <button class="btn ghost" id="choose-voice" onclick="openVoicePicker()">🎙 Choose voice</button>
             <button class="btn" id="run-voiceover" onclick="runStage('voiceover')">Run</button>
           </div>
           <div class="stage-body">
@@ -97,7 +132,8 @@
         <div class="stage" id="stage-visuals">
           <div class="stage-head">
             <span class="stage-num">3</span>
-            <div class="stage-title"><h3>Visuals</h3><p>YouTube Creative Commons / stock clips &amp; images</p></div>
+            <div class="stage-title"><h3>Visuals</h3><p>Choose a style for clips, images &amp; motion graphics</p></div>
+            <select id="visual-style" class="style-select" onchange="onVisualStyleChange()"></select>
             <span class="badge pending" id="badge-visuals">pending</span>
             <button class="btn" id="run-visuals" onclick="runStage('visuals')">Run</button>
           </div>
@@ -138,6 +174,40 @@
       </div>
     </section>
   </main>
+
+  <!-- Voice picker modal -->
+  <div id="voice-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3>Choose a voice</h3>
+        <button class="btn ghost" onclick="closeVoicePicker()">✕</button>
+      </div>
+
+      <input id="voice-search" class="voice-search" placeholder="Search voices…" oninput="renderVoiceList()" />
+
+      <div class="filter-row">
+        <div class="chips" id="voice-gender">
+          <button class="chip active" data-g="All" onclick="setGenderFilter(this)">All</button>
+          <button class="chip" data-g="Female" onclick="setGenderFilter(this)">Female</button>
+          <button class="chip" data-g="Male" onclick="setGenderFilter(this)">Male</button>
+        </div>
+        <div class="chips" id="voice-age">
+          <button class="chip active" data-a="All" onclick="setAgeFilter(this)">All ages</button>
+          <button class="chip" data-a="Adult" onclick="setAgeFilter(this)">Adult</button>
+          <button class="chip" data-a="Young" onclick="setAgeFilter(this)">Young</button>
+        </div>
+        <select id="voice-accent" onchange="renderVoiceList()">
+          <option value="All">All accents</option>
+        </select>
+      </div>
+
+      <div id="voice-list" class="voice-list"></div>
+
+      <div class="modal-foot">
+        <span class="hint">▶ to preview · click a row to select. No true "older" voice exists in edge-tts — lower the Pitch for a more mature tone.</span>
+      </div>
+    </div>
+  </div>
 
   <div id="toast" class="toast"></div>
   <script src="/app.js"></script>

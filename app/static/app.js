@@ -1,4 +1,17 @@
-const state = { pid: null, settings: {}, voices: [], scenes: [] };
+const state = {
+  pid: null,
+  settings: {},
+  voices: [],
+  scenes: [],
+  voiceChoice: null,
+  genderFilter: 'All',
+  ageFilter: 'All',
+  accentFilter: 'All',
+  previewAudio: null,
+  archive: [],
+  styles: [],
+  visualStyle: 'stock',
+};
 
 const STAGES = ['voiceover', 'visuals', 'audio', 'assembly'];
 const IMPLEMENTED = ['voiceover', 'visuals', 'audio', 'assembly'];
@@ -43,7 +56,9 @@ function toast(msg) {
 async function init() {
   try { state.settings = await api('/api/settings'); } catch {}
   try { state.voices = await api('/api/voices'); } catch {}
+  try { state.styles = await api('/api/styles'); } catch {}
   renderSettings();
+  loadArchive();
 
   const saved = localStorage.getItem('vp_pid');
   if (saved) {
@@ -61,14 +76,17 @@ async function newProject() {
   state.scenes = [];
   renderScenes();
   resetStages();
+  loadArchive();
   toast('New project created');
 }
 
 async function refreshProject() {
   const p = await api(`/api/projects/${state.pid}`);
   $('pid').textContent = p.id;
+  $('script').value = p.script || '';
   state.scenes = p.scenes || [];
   renderScenes();
+  resetStages();
   for (const [name, s] of Object.entries(p.stages || {})) {
     if (s.status === 'done') setBadge(name, 'done');
     else if (s.status === 'error') setBadge(name, 'error');
@@ -78,33 +96,296 @@ async function refreshProject() {
 
 /* ---------------------------------------------------------------- settings */
 function renderSettings() {
-  const sel = $('set-voice');
-  sel.innerHTML = '';
-  (state.voices || []).forEach(([id, label]) => {
-    const o = document.createElement('option');
-    o.value = id; o.textContent = label;
-    if (id === state.settings.voice) o.selected = true;
-    sel.appendChild(o);
-  });
+  state.voiceChoice = state.settings.voice || 'en-US-AriaNeural';
+  renderVoiceTrigger();
+  populateAccentOptions();
   $('set-rate').value = state.settings.voice_rate || '+0%';
   $('set-pitch').value = state.settings.voice_pitch || '+0Hz';
   $('set-resolution').value = state.settings.resolution || '1920x1080';
   $('set-captions').checked = state.settings.captions !== false;
+  state.visualStyle = state.settings.visual_style || 'stock';
+  renderVisualStyles();
+  $('set-openrouter-key').value = state.settings.openrouter_api_key || '';
+  $('set-openrouter-model').value = state.settings.openrouter_image_model || 'black-forest-labs/flux-schnell';
+  $('set-renderer').value = state.settings.renderer || 'remotion';
 }
 
-function toggleSettings() { $('settings').classList.toggle('hidden'); }
+function renderVisualStyles() {
+  const sel = $('visual-style');
+  if (!sel) return;
+  sel.innerHTML = '';
+  (state.styles || []).forEach((s) => {
+    const o = document.createElement('option');
+    o.value = s.id;
+    o.textContent = s.name + (s.needs_key ? ' (AI)' : '');
+    o.title = s.description;
+    if (s.id === state.visualStyle) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+async function onVisualStyleChange() {
+  state.visualStyle = $('visual-style').value;
+  try {
+    await api('/api/settings', { method: 'POST', body: { settings: { visual_style: state.visualStyle } } });
+  } catch {}
+}
+
+function toggleMenu() {
+  const panel = $('menu-panel');
+  const willOpen = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden');
+  if (willOpen) loadArchive();
+}
+
+function switchTab(name) {
+  const map = {
+    settings: ['tab-settings', 'pane-settings'],
+    archive: ['tab-archive', 'pane-archive'],
+  };
+  Object.entries(map).forEach(([key, [tabId, paneId]]) => {
+    const active = key === name;
+    $(tabId).classList.toggle('active', active);
+    $(paneId).classList.toggle('hidden', !active);
+  });
+  if (name === 'archive') loadArchive();
+}
+
+// Close the menu when clicking outside of it
+document.addEventListener('click', (e) => {
+  const panel = $('menu-panel');
+  const btn = $('menu-btn');
+  if (!panel.classList.contains('hidden') && !panel.contains(e.target) && !btn.contains(e.target)) {
+    panel.classList.add('hidden');
+  }
+});
 
 async function saveSettings() {
   const settings = {
-    voice: $('set-voice').value,
+    voice: state.voiceChoice || 'en-US-AriaNeural',
     voice_rate: $('set-rate').value,
     voice_pitch: $('set-pitch').value,
     resolution: $('set-resolution').value,
     captions: $('set-captions').checked,
+    visual_style: state.visualStyle,
+    openrouter_api_key: $('set-openrouter-key').value.trim(),
+    openrouter_image_model: $('set-openrouter-model').value.trim(),
+    renderer: $('set-renderer').value,
   };
   state.settings = await api('/api/settings', { method: 'POST', body: { settings } });
   toast('Settings saved');
 }
+
+/* ---------------------------------------------------------------- archive */
+async function loadArchive() {
+  try { state.archive = await api('/api/projects'); } catch { state.archive = []; }
+  renderArchive();
+}
+
+function renderArchive() {
+  const list = $('archive-list');
+  const delAll = $('archive-delete-all');
+  list.innerHTML = '';
+  const projects = state.archive || [];
+  if (!projects.length) {
+    const empty = document.createElement('div');
+    empty.className = 'archive-empty';
+    empty.textContent = 'No saved projects yet.';
+    list.appendChild(empty);
+    if (delAll) delAll.disabled = true;
+    return;
+  }
+  if (delAll) delAll.disabled = false;
+  projects.forEach((p) => {
+    const done = Object.values(p.stages || {}).filter((s) => s === 'done').length;
+    const total = Object.keys(p.stages || {}).length;
+    const date = new Date((p.created_at || 0) * 1000).toLocaleString();
+    const current = p.id === state.pid;
+
+    const row = document.createElement('div');
+    row.className = 'archive-item';
+
+    const meta = document.createElement('div');
+    meta.className = 'archive-meta';
+    meta.innerHTML = `<span class="archive-title">${esc(p.id)}${current ? ' <em class="cur">(current)</em>' : ''}</span>
+      <span class="archive-sub">${esc(date)} · ${p.scenes} scene(s) · ${done}/${total} stages done</span>`;
+
+    const openBtn = document.createElement('button');
+    openBtn.className = 'btn';
+    openBtn.textContent = 'Open';
+    openBtn.disabled = current;
+    openBtn.addEventListener('click', () => openProject(p.id));
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn danger';
+    delBtn.textContent = 'Delete';
+    delBtn.addEventListener('click', () => deleteProject(p.id));
+
+    row.appendChild(meta);
+    row.appendChild(openBtn);
+    row.appendChild(delBtn);
+    list.appendChild(row);
+  });
+}
+
+async function openProject(pid) {
+  state.pid = pid;
+  localStorage.setItem('vp_pid', pid);
+  await refreshProject();
+  loadArchive();
+  toast(`Opened ${pid}`);
+}
+
+async function deleteProject(pid) {
+  if (!confirm(`Delete project ${pid}? This permanently removes all its files.`)) return;
+  await api(`/api/projects/${pid}`, { method: 'DELETE' });
+  toast(`Deleted ${pid}`);
+  if (pid === state.pid) await newProject();
+  else loadArchive();
+}
+
+async function deleteAllProjects() {
+  const n = (state.archive || []).length;
+  if (!n) return;
+  if (!confirm(`Delete ALL ${n} project(s)? This permanently removes all their files.`)) return;
+  await api('/api/projects', { method: 'DELETE' });
+  toast(`Deleted ${n} project(s)`);
+  await newProject();
+}
+
+/* ---------------------------------------------------------------- voice picker */
+function voiceById(id) { return (state.voices || []).find((v) => v.id === id); }
+
+function voiceLabel(v) { return `${v.name} · ${v.accent} · ${v.gender}`; }
+
+function renderVoiceTrigger() {
+  const v = voiceById(state.voiceChoice);
+  const el = $('voice-current');
+  if (el) el.textContent = v ? voiceLabel(v) : '';
+}
+
+function populateAccentOptions() {
+  const sel = $('voice-accent');
+  const accents = [...new Set((state.voices || []).map((v) => v.accent))].sort();
+  sel.innerHTML = '<option value="All">All accents</option>';
+  accents.forEach((a) => {
+    const o = document.createElement('option');
+    o.value = a; o.textContent = a;
+    if (a === state.accentFilter) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+function setGenderFilter(btn) {
+  state.genderFilter = btn.dataset.g;
+  document.querySelectorAll('#voice-gender .chip').forEach((c) => c.classList.remove('active'));
+  btn.classList.add('active');
+  renderVoiceList();
+}
+
+function setAgeFilter(btn) {
+  state.ageFilter = btn.dataset.a;
+  document.querySelectorAll('#voice-age .chip').forEach((c) => c.classList.remove('active'));
+  btn.classList.add('active');
+  renderVoiceList();
+}
+
+function openVoicePicker() {
+  $('voice-modal').classList.remove('hidden');
+  $('voice-search').value = '';
+  renderVoiceList();
+  $('voice-search').focus();
+}
+
+function closeVoicePicker() {
+  $('voice-modal').classList.add('hidden');
+  stopPreview();
+}
+
+function renderVoiceList() {
+  const q = ($('voice-search').value || '').toLowerCase().trim();
+  state.accentFilter = $('voice-accent').value;
+  const list = $('voice-list');
+  list.innerHTML = '';
+
+  const matches = (state.voices || []).filter((v) => {
+    if (state.genderFilter !== 'All' && v.gender !== state.genderFilter) return false;
+    if (state.ageFilter !== 'All' && v.age !== state.ageFilter) return false;
+    if (state.accentFilter !== 'All' && v.accent !== state.accentFilter) return false;
+    if (q) {
+      const hay = `${v.name} ${v.gender} ${v.accent} ${v.age} ${v.persona}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  if (!matches.length) {
+    const empty = document.createElement('div');
+    empty.className = 'voice-empty';
+    empty.textContent = 'No voices match your filters.';
+    list.appendChild(empty);
+    return;
+  }
+
+  matches.forEach((v) => {
+    const row = document.createElement('div');
+    row.className = 'voice-item' + (v.id === state.voiceChoice ? ' selected' : '');
+    row.innerHTML = `
+      <button class="vplay" title="Preview" data-id="${esc(v.id)}">▶</button>
+      <div class="vmeta">
+        <span class="vname">${esc(v.name)}</span>
+        <span class="vsub">${esc(v.gender)} · ${esc(v.accent)} · ${esc(v.age)}</span>
+      </div>
+      <span class="vpersona">${esc(v.persona)}</span>
+    `;
+    row.addEventListener('click', (e) => {
+      if (e.target.classList.contains('vplay')) return;
+      selectVoice(v.id);
+    });
+    list.appendChild(row);
+  });
+}
+
+function selectVoice(id) {
+  state.voiceChoice = id;
+  renderVoiceTrigger();
+  renderVoiceList();
+  closeVoicePicker();
+  saveSettings().then(() => toast(`Voice saved: ${voiceLabel(voiceById(id))}`));
+}
+
+async function previewVoice(id) {
+  stopPreview();
+  const btn = document.querySelector(`.vplay[data-id="${CSS.escape(id)}"]`);
+  if (btn) btn.textContent = '…';
+  try {
+    const r = await api('/api/voices/preview', { method: 'POST', body: { voice: id } });
+    const a = new Audio(r.url);
+    state.previewAudio = a;
+    a.onended = () => { if (btn) btn.textContent = '▶'; state.previewAudio = null; };
+    a.play();
+    if (btn) btn.textContent = '■';
+  } catch (e) {
+    if (btn) btn.textContent = '▶';
+    toast(`Preview failed: ${e.message || e}`);
+  }
+}
+
+function stopPreview() {
+  if (state.previewAudio) {
+    state.previewAudio.pause();
+    state.previewAudio = null;
+  }
+  document.querySelectorAll('.vplay').forEach((b) => { b.textContent = '▶'; });
+}
+
+// Attach preview handler via delegation on the voice list
+document.addEventListener('click', (e) => {
+  if (e.target.classList && e.target.classList.contains('vplay')) {
+    e.stopPropagation();
+    previewVoice(e.target.dataset.id);
+  }
+});
 
 /* ---------------------------------------------------------------- script */
 function loadExample() { $('script').value = EXAMPLE; }
@@ -185,7 +466,12 @@ async function runStage(stage) {
   setBadge(stage, 'running');
   clearOutput(stage);
   try {
-    const r = await api(`/api/projects/${state.pid}/stages/${stage}/run`, { method: 'POST' });
+    let url = `/api/projects/${state.pid}/stages/${stage}/run`;
+    if (stage === 'visuals') {
+      state.visualStyle = $('visual-style').value || 'stock';
+      url += `?style=${encodeURIComponent(state.visualStyle)}`;
+    }
+    const r = await api(url, { method: 'POST' });
     await pollJob(r.job_id, stage);
     await refreshProject();
   } catch (e) {
@@ -235,34 +521,19 @@ function renderResult(stage, result) {
 }
 
 function renderVoiceover(el, r) {
-  if (r.scenes && r.scenes.length) {
-    r.scenes.forEach((s) => {
-      const row = document.createElement('div');
-      row.className = 'audio-row';
-      row.innerHTML = `<span class="scene-label">${esc(s.scene)}</span>`;
-      const a = document.createElement('audio');
-      a.controls = true; a.src = s.file;
-      row.appendChild(a);
-      const d = document.createElement('span');
-      d.className = 'dur'; d.textContent = s.duration.toFixed(1) + 's';
-      row.appendChild(d);
-      el.appendChild(row);
-    });
+  if (!r || !r.combined) return;
+  const row = document.createElement('div');
+  row.className = 'audio-row';
+  row.innerHTML = `<span class="scene-label">Full narration</span>`;
+  const a = document.createElement('audio');
+  a.controls = true; a.src = r.combined;
+  row.appendChild(a);
+  if (r.total_duration) {
+    const d = document.createElement('span');
+    d.className = 'dur'; d.textContent = r.total_duration.toFixed(1) + 's';
+    row.appendChild(d);
   }
-  if (r.combined) {
-    const row = document.createElement('div');
-    row.className = 'audio-row';
-    row.innerHTML = `<span class="scene-label">Full narration</span>`;
-    const a = document.createElement('audio');
-    a.controls = true; a.src = r.combined;
-    row.appendChild(a);
-    if (r.total_duration) {
-      const d = document.createElement('span');
-      d.className = 'dur'; d.textContent = r.total_duration.toFixed(1) + 's';
-      row.appendChild(d);
-    }
-    el.appendChild(row);
-  }
+  el.appendChild(row);
 }
 
 function renderVisuals(el, r) {

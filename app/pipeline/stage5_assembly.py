@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+from . import remotion_render
 from .utils import ffmpeg, run
 
 LEAD_S = 0.4          # silence before narration in each scene
@@ -9,7 +10,7 @@ MUSIC_VOLUME = 0.18   # background music level relative to narration
 
 
 def run_assembly(ctx):
-    """Render per-scene segments (visual + narration + sfx) and mix in music."""
+    """Render the finished video with Remotion (fallback: ffmpeg)."""
     log = ctx["logger"]
     progress = ctx.get("progress", lambda p: None)
     scenes = ctx["scenes"]
@@ -20,14 +21,39 @@ def run_assembly(ctx):
     W, H = parse_resolution(settings.get("resolution", "1920x1080"))
     fps = int(settings.get("fps", 30))
 
+    documentary = (ctx.get("visual_style") or settings.get("visual_style") or "stock") == "documentary"
+    if documentary:
+        log("Documentary style detected — applying sepia / film grain / letterbox grade")
+
+    durations = [scene_duration(scene) for scene in scenes]
+    total = round(sum(durations), 2)
+    renderer = (settings.get("renderer") or "remotion").lower()
+
+    if renderer == "remotion":
+        if not remotion_render.is_available():
+            log("Remotion not installed (node_modules missing) — using ffmpeg assembly")
+        else:
+            log("Using Remotion renderer (motion graphics + transitions)")
+            try:
+                remotion_render.render(ctx, scenes, durations, out_dir, W, H, fps,
+                                       documentary, log, progress)
+                progress(100)
+                log(f"Final video ready: {total:.1f}s")
+                return {
+                    "final": f"/media/{ctx['pid']}/stage5_assembly/final.mp4",
+                    "duration": total,
+                    "scenes": len(scenes),
+                    "resolution": f"{W}x{H}",
+                    "renderer": "remotion",
+                }
+            except Exception as e:  # noqa: BLE001 - fall back to ffmpeg
+                log(f"Remotion render failed — falling back to ffmpeg assembly: {e}")
+
     segs = []
-    total = 0.0
-    for i, scene in enumerate(scenes):
-        dur = scene_duration(scene)
-        total += dur
+    for i, (scene, dur) in enumerate(zip(scenes, durations)):
         seg = out_dir / f"seg_{i + 1:02d}.mp4"
         log(f"[scene {scene['index']}] rendering segment ({dur}s)…")
-        build_segment(ctx, scene, seg, dur, W, H, fps, log)
+        build_segment(ctx, scene, seg, dur, W, H, fps, log, documentary=documentary)
         segs.append(seg)
         progress(5 + int(55 * (i + 1) / max(len(scenes), 1)))
 
@@ -38,9 +64,9 @@ def run_assembly(ctx):
 
     final = out_dir / "final.mp4"
     music = ctx.get("music_media") or {}
-    if music.get("rel") and (ctx["root"] / music["rel"]).exists():
+    if music.get("rel") and (ctx["dir"] / music["rel"]).exists():
         log("Mixing background music…")
-        mix_music(concat, ctx["root"] / music["rel"], total, final, log)
+        mix_music(concat, ctx["dir"] / music["rel"], total, final, log)
     else:
         log("No background music — finalizing without it")
         run([ffmpeg(), "-y", "-i", str(concat), "-c", "copy",
@@ -50,13 +76,14 @@ def run_assembly(ctx):
     log(f"Final video ready: {total:.1f}s")
     return {
         "final": f"/media/{ctx['pid']}/stage5_assembly/final.mp4",
-        "duration": round(total, 2),
+        "duration": total,
         "scenes": len(scenes),
         "resolution": f"{W}x{H}",
+        "renderer": "ffmpeg",
     }
 
 
-def build_segment(ctx, scene, seg, dur, W, H, fps, log):
+def build_segment(ctx, scene, seg, dur, W, H, fps, log, documentary=False):
     proj = ctx["dir"]
     vm = scene.get("visual_media") or {}
     inputs = []
@@ -78,6 +105,9 @@ def build_segment(ctx, scene, seg, dur, W, H, fps, log):
     else:
         inputs += ["-f", "lavfi", "-i", f"color=c=0x151a2a:s={W}x{H}:r={fps}"]
         base = "[0:v]null"
+
+    if documentary:
+        base += "," + documentary_grade(H)
 
     # ---- captions (motion graphics) ----
     settings = ctx.get("settings", {})
@@ -155,6 +185,22 @@ def scene_duration(scene) -> float:
 def parse_resolution(s):
     w, h = s.lower().replace("x", " ").split()
     return int(w), int(h)
+
+
+def documentary_grade(H):
+    """ffmpeg filter chain for the archival 1990s BBC documentary look.
+
+    Faded/warm sepia tone, vignette, film grain, and cinematic letterbox bars.
+    """
+    bar = int(round(H * 0.11))
+    return (
+        "eq=saturation=0.45:contrast=1.05:brightness=0.005,"
+        "colorbalance=rs=.08:gs=.03:bs=-.10:rm=.10:gm=.04:bm=-.13:rh=.08:gh=.01:bh=-.15,"
+        "vignette=angle=PI/5,"
+        "noise=alls=16:allf=t+u,"
+        f"drawbox=x=0:y=0:w=iw:h={bar}:color=black:t=fill,"
+        f"drawbox=x=0:y=ih-{bar}:w=iw:h={bar}:color=black:t=fill"
+    )
 
 
 def find_font():

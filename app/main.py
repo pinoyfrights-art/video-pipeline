@@ -11,6 +11,7 @@ from .pipeline import (
     stage3_visuals,
     stage4_audio,
     stage5_assembly,
+    styles,
     voices,
 )
 
@@ -41,6 +42,11 @@ class SettingsIn(BaseModel):
     settings: dict
 
 
+class PreviewIn(BaseModel):
+    voice: str
+    text: str | None = None
+
+
 # ---------------------------------------------------------------- health
 @app.get("/api/health")
 def health():
@@ -66,6 +72,18 @@ def get_voices():
     return voices.VOICES
 
 
+@app.post("/api/voices/preview")
+def voice_preview(body: PreviewIn):
+    if not voices.is_known_voice(body.voice):
+        raise HTTPException(400, "Unknown voice")
+    return {"url": voices.preview_url(body.voice, body.text)}
+
+
+@app.get("/api/styles")
+def get_styles():
+    return styles.VISUAL_STYLES
+
+
 # ---------------------------------------------------------------- projects
 @app.post("/api/projects")
 def create_project():
@@ -78,6 +96,23 @@ def get_project(pid: str):
     if st is None:
         raise HTTPException(404, "Project not found")
     return st
+
+
+@app.get("/api/projects")
+def list_projects():
+    return state.list_projects()
+
+
+@app.delete("/api/projects")
+def delete_all_projects():
+    return {"deleted_count": state.delete_all_projects()}
+
+
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: str):
+    if not state.delete_project(pid):
+        raise HTTPException(404, "Project not found")
+    return {"deleted": pid}
 
 
 @app.post("/api/projects/{pid}/script")
@@ -113,11 +148,12 @@ def _stage_context(pid: str, st: dict) -> dict:
         "scenes": st["scenes"],
         "settings": load_settings(),
         "music_media": st.get("music_media"),
+        "visual_style": st.get("visual_style"),
     }
 
 
 @app.post("/api/projects/{pid}/stages/{stage}/run")
-def run_stage(pid: str, stage: str):
+def run_stage(pid: str, stage: str, style: str | None = None):
     st = state.load_state(pid)
     if st is None:
         raise HTTPException(404, "Project not found")
@@ -135,7 +171,9 @@ def run_stage(pid: str, stage: str):
         elif stage == "visuals":
             if not st["scenes"]:
                 raise RuntimeError("No scenes yet — save & parse the script first (Stage 1).")
-            result = stage3_visuals.run_visuals(ctx)
+            chosen = style or st.get("visual_style") or "stock"
+            result = stage3_visuals.run_visuals(ctx, style=chosen)
+            st["visual_style"] = chosen
             st["stages"]["visuals"] = {"status": "done", "result": result}
         elif stage == "audio":
             if not st["scenes"]:

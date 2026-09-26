@@ -16,6 +16,14 @@ data/
 .env.*
 *.pem
 
+# --- Remotion ---
+remotion/node_modules/
+remotion/.npm-cache/
+remotion/input_*.json
+remotion/input.json
+remotion/out.mp4
+remotion/.remotion/
+
 # --- OS / editor ---
 .DS_Store
 Thumbs.db

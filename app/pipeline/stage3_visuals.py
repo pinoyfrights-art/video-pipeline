@@ -1,10 +1,12 @@
 import json
 import re
+import shutil
 import subprocess
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import openrouter, styles
 from .utils import ffmpeg, probe_duration, run, ytdlp
 
 YT_BASE_ARGS = [
@@ -15,8 +17,12 @@ YT_FORMAT = "bv*[height<=720][vcodec^=avc1][protocol^=https]+ba[protocol^=https]
 UA = "VideoPipeline/1.0 (+https://example.net/video-pipeline; contact: pipeline@example.net)"
 
 
-def run_visuals(ctx):
-    """Find/download a visual (YouTube CC clip or Wikimedia image) per scene.
+def run_visuals(ctx, style="stock"):
+    """Find/download a visual per scene according to the chosen style.
+
+    style "stock" pulls YouTube CC clips / Wikimedia images; "documentary"
+    mixes an AI still with a Creative Commons clip/image (falls back to the
+    CC media alone when no key).
 
     ctx keys: pid, root, dir, scenes, settings, logger, progress.
     """
@@ -31,7 +37,13 @@ def run_visuals(ctx):
     for i, scene in enumerate(scenes):
         progress(5 + int(88 * i / total))
         log(f"[scene {scene['index']}] visual query: '{scene.get('visual') or '(none)'}'")
-        item = acquire_visual(ctx, scene, out_dir, log)
+        if style == "documentary":
+            item = acquire_documentary(ctx, scene, out_dir, log)
+            if item is None:
+                log("  falling back to stock (Creative Commons) visuals")
+                item = acquire_visual(ctx, scene, out_dir, log)
+        else:
+            item = acquire_visual(ctx, scene, out_dir, log)
         scene["visual_media"] = {
             k: v for k, v in item.items()
             if k in ("type", "clip", "image", "thumb", "source", "source_title",
@@ -45,7 +57,7 @@ def run_visuals(ctx):
     progress(95)
     n_ok = sum(1 for r in results if r.get("type") in ("video", "image"))
     log(f"Visuals complete: {n_ok}/{len(results)} scene(s) have media")
-    return {"scenes": results, "count": n_ok, "total": len(results)}
+    return {"scenes": results, "count": n_ok, "total": len(results), "style": style}
 
 
 def acquire_visual(ctx, scene, out_dir, log):
@@ -80,6 +92,177 @@ def acquire_visual(ctx, scene, out_dir, log):
     except Exception as e:  # noqa: BLE001
         log(f"  Wikimedia fallback failed: {e}")
         return {"scene": scene["id"], "type": "none", "reason": str(e)}
+
+
+def acquire_documentary(ctx, scene, out_dir, log):
+    """Documentary style: mix an AI still with a Creative Commons visual.
+
+    Generates an AI image (when a key is set) and also pulls a CC clip/image,
+    then crossfades them into a single montage clip. Falls back gracefully:
+    AI-only when no CC media is found, CC-only when no key is set.
+    """
+    settings = ctx.get("settings") or {}
+    key = (settings.get("openrouter_api_key") or "").strip()
+    model = settings.get("openrouter_image_model") or openrouter.DEFAULT_IMAGE_MODEL
+
+    sdir = out_dir / scene["id"]
+    if sdir.exists():
+        shutil.rmtree(sdir)
+    sdir.mkdir(parents=True, exist_ok=True)
+    ai_dir = sdir / "ai"
+    ai_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- 1. AI still -----------------------------------------------------
+    ai_image = None
+    if key:
+        prompt = styles.build_documentary_prompt(scene)
+        log(f"  [documentary] generating AI image with '{model}'")
+        try:
+            raw = openrouter.generate_image(prompt, key, model=model, size="1024x1024")
+            ai_image = ai_dir / "image.png"
+            ai_image.write_bytes(raw)
+            run([ffmpeg(), "-y", "-i", str(ai_image), "-frames:v", "1",
+                 "-vf", "scale=640:-2", "-q:v", "3", str(ai_dir / "thumb.jpg")], log=log)
+            write_source(ai_dir, {
+                "source": "OpenRouter",
+                "source_title": f"{model} — Documentary Style",
+                "source_url": "https://openrouter.ai",
+                "license": "AI-generated",
+                "author": "",
+            })
+        except Exception as e:  # noqa: BLE001
+            log(f"  [documentary] AI generation failed: {e}")
+            ai_image = None
+    else:
+        log("  [documentary] no OpenRouter API key — Creative Commons only")
+
+    # ---- 2. Creative Commons media --------------------------------------
+    cc_item = None
+    query = (scene.get("visual") or "").strip()
+    if query:
+        clip_len = max(4.0, min(120.0, scene_seconds(scene) + 2.0))
+        attempts = [query]
+        if "creative commons" not in query.lower():
+            attempts.append(query + " creative commons")
+        for q in attempts:
+            try:
+                cc_item = try_youtube(ctx, scene, sdir, q, clip_len, log)
+                if cc_item:
+                    break
+            except Exception as e:  # noqa: BLE001
+                log(f"  YouTube attempt failed: {e}")
+        if cc_item is None:
+            log("  no Creative Commons video — falling back to Wikimedia Commons image")
+            try:
+                cc_item = try_wikimedia(ctx, scene, sdir, query, log)
+            except Exception as e:  # noqa: BLE001
+                log(f"  Wikimedia fallback failed: {e}")
+
+    has_cc = bool(cc_item and cc_item.get("type") in ("video", "image"))
+
+    # ---- 3. combine ------------------------------------------------------
+    if ai_image and has_cc:
+        log("  [documentary] crossfading AI still with Creative Commons media…")
+        montage = sdir / "montage.mp4"
+        try:
+            build_montage(ai_image, cc_item, sdir, montage, scene, settings, log)
+        except Exception as e:  # noqa: BLE001
+            log(f"  [documentary] montage failed ({e}) — using CC media alone")
+            return _with_media(ctx, scene, cc_item)
+
+        meta = {
+            "source": "OpenRouter + Creative Commons",
+            "source_title": f"{model} × {cc_item.get('source_title') or 'archive footage'} — Documentary Mix",
+            "source_url": "https://openrouter.ai",
+            "license": "AI-generated + " + (cc_item.get("license") or "Creative Commons"),
+            "author": cc_item.get("author") or "",
+        }
+        write_source(sdir, meta)
+        return {
+            "scene": scene["id"], "index": scene["index"], "type": "video",
+            "clip": f"/media/{ctx['pid']}/stage3_visuals/{scene['id']}/montage.mp4",
+            "image": f"/media/{ctx['pid']}/stage3_visuals/{scene['id']}/ai/thumb.jpg",
+            "duration": round(probe_duration(montage), 2),
+            **meta,
+        }
+
+    if ai_image:
+        meta = {
+            "source": "OpenRouter",
+            "source_title": f"{model} — Documentary Style",
+            "source_url": "https://openrouter.ai",
+            "license": "AI-generated",
+            "author": "",
+        }
+        return {
+            "scene": scene["id"], "index": scene["index"], "type": "image",
+            "image": f"/media/{ctx['pid']}/stage3_visuals/{scene['id']}/ai/image.png",
+            "thumb": f"/media/{ctx['pid']}/stage3_visuals/{scene['id']}/ai/thumb.jpg",
+            **meta,
+        }
+
+    if has_cc:
+        return _with_media(ctx, scene, cc_item)
+
+    return {"scene": scene["id"], "type": "none", "reason": "no visuals acquired"}
+
+
+def _with_media(ctx, scene, item):
+    """Return a CC item with its scene/index fields filled in."""
+    item = dict(item)
+    item["scene"] = scene["id"]
+    item["index"] = scene["index"]
+    return item
+
+
+def _local_media(sdir, media_path):
+    """Resolve a /media/… URL to the file that try_youtube/try_wikimedia wrote into sdir."""
+    return sdir / media_path.rsplit("/", 1)[-1]
+
+
+def build_montage(ai_img, cc_item, sdir, out, scene, settings, log):
+    """Crossfade an AI still (slow push-in) into a Creative Commons clip/image."""
+    W, H = parse_resolution(settings.get("resolution", "1920x1080"))
+    fps = int(settings.get("fps", 30))
+    clip_len = max(4.0, min(60.0, scene_seconds(scene) + 2.0))
+    half = clip_len / 2.0
+    fade = min(1.0, half * 0.4)
+    offset = half - fade
+    n_frames = max(int(round(half * fps)), 2)
+
+    zoom = (f"zoompan=z='min(1.0+0.0008*on,1.15)':d={n_frames}"
+            f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps={fps}")
+
+    ai_filter = (
+        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+        f"format=yuv420p,{zoom},settb=AVTB[v0]"
+    )
+
+    if cc_item.get("type") == "video":
+        cc_path = _local_media(sdir, cc_item["clip"])
+        inputs = ["-i", str(ai_img), "-stream_loop", "-1", "-i", str(cc_path)]
+        cc_filter = (
+            f"[1:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+            f"format=yuv420p,fps={fps},trim=duration={half:.3f},setpts=PTS-STARTPTS,"
+            f"settb=AVTB[v1]"
+        )
+    else:
+        cc_path = _local_media(sdir, cc_item["image"])
+        inputs = ["-i", str(ai_img), "-i", str(cc_path)]
+        cc_filter = (
+            f"[1:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+            f"format=yuv420p,{zoom},settb=AVTB[v1]"
+        )
+
+    fc = (
+        f"{ai_filter};{cc_filter};"
+        f"[v0][v1]xfade=transition=fade:duration={fade:.3f}:offset={offset:.3f},"
+        f"format=yuv420p[v]"
+    )
+    cmd = [ffmpeg(), "-y", *inputs, "-filter_complex", fc, "-map", "[v]",
+           "-r", str(fps), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+           "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", str(out)]
+    run(cmd, log=log)
 
 
 def try_youtube(ctx, scene, sdir, query, clip_len, log):
@@ -188,6 +371,11 @@ def try_wikimedia(ctx, scene, sdir, query, log):
 
 
 # ---------------------------------------------------------------- helpers
+def parse_resolution(s) -> tuple:
+    w, h = str(s).lower().replace("x", " ").split()
+    return int(w), int(h)
+
+
 def scene_seconds(scene) -> float:
     if scene.get("audio_duration"):
         return float(scene["audio_duration"])

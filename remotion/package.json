@@ -1,0 +1,17 @@
+{
+  "name": "video-pipeline-remotion",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remotion renderer for the Video Pipeline assembly stage (motion graphics & transitions).",
+  "scripts": {
+    "render": "remotion render"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.529",
+    "@remotion/renderer": "^4.0.529",
+    "@remotion/transitions": "^4.0.529",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "remotion": "^4.0.529"
+  }
+}
